@@ -33,7 +33,7 @@ macro_rules! make_uN {
             }
 
             let bytes = (lit.len() + 1) / 2;
-            assert!(bytes < $uN::BYTES);
+            assert!(bytes <= $uN::BYTES);
             let mut i = bytes;
             if lit.len() % 2 == 1 {
                 i -= 1;
@@ -50,7 +50,7 @@ macro_rules! make_uN {
 
         pub fn leading_zeros(&self) -> usize {
             let leading_zero_bytes = self.buf.iter().rev().take_while(|&b| *b == 0).count();
-            if leading_zero_bytes == $uN::BYTES { return 4096 }
+            if leading_zero_bytes == $uN::BYTES { return Self::BITS }
             let msbyte_pos = $uN::BYTES - leading_zero_bytes - 1;
             leading_zero_bytes * 8 + (self.buf[msbyte_pos].leading_zeros() as usize)
         }
@@ -237,11 +237,11 @@ macro_rules! make_uN {
             } else {
                 self = self >> (amount >> 3 << 3);
                 amount %= 8;
-                for i in 0..255 {
+                for i in 0..($uN::BYTES-1) {
                     let mut word = (self.buf[i] as u16) | ((self.buf[i+1] as u16) << 8);
                     self.buf[i] = (word >> amount) as u8;
                 }
-                self.buf[255] >>= amount;
+                self.buf[$uN::BYTES-1] >>= amount;
                 self
             }
         }
@@ -312,6 +312,9 @@ macro_rules! make_uN {
 }}
 
 
+make_uN!(u256, 256);
+make_uN!(u512, 512);
+make_uN!(u1024, 1024);
 make_uN!(u2048, 2048);
 make_uN!(u4096, 4096);
 
