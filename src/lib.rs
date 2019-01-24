@@ -4,16 +4,24 @@ use core::ops::{Add, Mul, Rem, Sub, Shl, Shr, BitOr};
 use core::cmp::Ordering;
 use core::fmt;
 use core::num::ParseIntError;
+use core::mem::transmute;
+
+pub trait ModExp {
+    fn modmul(a: Self, b: Self, m: Self) -> u2048;
+    fn modexp(a: Self, b: Self, m: Self) -> u2048;
+}
 
 macro_rules! make_uN {
     ($uN:ident, $bits:expr) => {
     #[derive(Copy, Clone)]
     #[allow(non_camel_case_types)]
+    #[repr(align(8))]
     pub struct $uN {
         buf: [u8; $uN::BYTES]
     }
 
     impl $uN {
+        const HWORDS: usize = $bits / 64;
         const BYTES: usize = $bits / 8;
         const BITS: usize = $bits;
 
@@ -21,9 +29,17 @@ macro_rules! make_uN {
             self.buf[bit / 8] & ((1 << (bit % 8)) as u8) == 1
         }
 
-        fn set_bit(mut self, bit: usize) -> Self {
+        fn _set_bit(mut self, bit: usize) -> Self {
             self.buf[bit / 8] |= (1 << (bit % 8)) as u8;
             self
+        }
+
+        fn buf64(&self) -> &[u64; Self::HWORDS] {
+            unsafe { transmute(&self.buf) }
+        }
+
+        fn buf64_mut(&mut self) -> &mut [u64; Self::HWORDS] {
+            unsafe { transmute(&mut self.buf) }
         }
 
         pub fn from_hex(mut lit: &str) -> Result<Self, ParseIntError> {
@@ -109,16 +125,19 @@ macro_rules! make_uN {
         type Output = $uN;
 
         fn add(self, other: $uN) -> $uN {
-            let mut out = $uN {
-                buf: [0; $uN::BYTES]
-            };
-            let mut carry = 0u16;
-            for i in 0..$uN::BYTES {
-                let a = self.buf[i];
-                let b = other.buf[i];
-                let word = (a as u16) + (b as u16) + carry;
-                out.buf[i] = word as u8;
-                carry = word >> 8;
+            let mut out: $uN = 0.into();
+            let mut carry = 0u128;
+            
+            for i in 0..$uN::HWORDS {
+                let self_buf = self.buf64();
+                let other_buf = other.buf64();
+                let out_buf = out.buf64_mut();
+
+                let a = self_buf[i];
+                let b = other_buf[i];
+                let word = (a as u128) + (b as u128) + carry;
+                out_buf[i] = word as u64;
+                carry = word >> 64;
             }
             out
         }
@@ -128,15 +147,17 @@ macro_rules! make_uN {
         type Output = $uN;
 
         fn sub(self, other: $uN) -> $uN {
-            let mut out = $uN {
-                buf: [0; $uN::BYTES]
-            };
-            let mut carry = 0;
-            for i in 0..$uN::BYTES {
-                let a = self.buf[i];
-                let b = other.buf[i];
-                let (subbed, carry_bool) = (a as u16).overflowing_sub((b as u16) + carry);
-                out.buf[i] = subbed as u8;
+            let mut out: $uN = 0.into();
+            let mut carry = 0u128;
+            for i in 0..$uN::HWORDS {
+                let self_buf = self.buf64();
+                let other_buf = other.buf64();
+                let out_buf = out.buf64_mut();
+
+                let a = self_buf[i];
+                let b = other_buf[i];
+                let (subbed, carry_bool) = (a as u128).overflowing_sub((b as u128) + carry);
+                out_buf[i] = subbed as u64;
                 carry = if carry_bool {1} else {0};
             }
             out
@@ -196,8 +217,11 @@ macro_rules! make_uN {
     impl BitOr for $uN {
         type Output = $uN;
         fn bitor(mut self, other: $uN) -> $uN {
-            for i in 0..$uN::BYTES {
-                self.buf[i] |= other.buf[i];
+            for i in 0..$uN::HWORDS {
+                let self_buf = self.buf64_mut();
+                let other_buf = other.buf64();
+
+                self_buf[i] |= other_buf[i];
             }
             self
         }
@@ -318,45 +342,36 @@ make_uN!(u1024, 1024);
 make_uN!(u2048, 2048);
 make_uN!(u4096, 4096);
 
-fn modmul2048(mut a: u2048, b: u2048, m: u2048) -> u2048 { 
-    let mut exta: u4096 = 0.into();
-    let mut extb: u4096 = 0.into();
-    let mut extm: u4096 = 0.into();
-    exta.buf[..u2048::BYTES].copy_from_slice(&a.buf);
-    extb.buf[..u2048::BYTES].copy_from_slice(&b.buf);
-    extm.buf[..u2048::BYTES].copy_from_slice(&m.buf);
+impl ModExp for u2048 {
+    fn modmul(mut a: u2048, b: u2048, m: u2048) -> u2048 { 
+        let mut exta: u4096 = 0.into();
+        let mut extb: u4096 = 0.into();
+        let mut extm: u4096 = 0.into();
+        exta.buf[..u2048::BYTES].copy_from_slice(&a.buf);
+        extb.buf[..u2048::BYTES].copy_from_slice(&b.buf);
+        extm.buf[..u2048::BYTES].copy_from_slice(&m.buf);
 
-    let res = (exta * extb) % extm;
-    a.buf[..].copy_from_slice(&res.buf[..u2048::BYTES]);
-    a
-} 
+        let res = (exta * extb) % extm;
+        a.buf[..].copy_from_slice(&res.buf[..u2048::BYTES]);
+        a
+    } 
 
-// pub fn modexp2048(base: u2048, exp: &u2048, md: &u2048) -> u2048 {
-//     let mut prod: u2048 = 1.into();
-//     let mut bit_exp = base;
-//     if exp.test_bit(0) {
-//         prod = modmul2048(prod, bit_exp, *md);
-//     }
-//     for bit in 1..u2048::BITS {
-//         bit_exp = modmul2048(bit_exp, bit_exp, *md);
-//         if exp.test_bit(bit) {
-//             prod = modmul2048(prod, bit_exp, *md);
-//         }
-//     }
-//     prod
-// }
-
-pub fn modexp2048(mut base: u2048, exp: &u2048, md: u2048) -> u2048 {
-    let mut prod: u2048 = 1.into();
-    base = base % md;
-    for bit in 1..u2048::BITS {
-        if exp.test_bit(bit) {
-           prod = modmul2048(prod, base, md);
+    fn modexp(mut base: u2048, exp: u2048, md: u2048) -> u2048 {
+        let mut prod: u2048 = 1.into();
+        base = base % md;
+        for bit in 1..u2048::BITS {
+            if exp.test_bit(bit) {
+               prod = Self::modmul(prod, base, md);
+            }
+            base = Self::modmul(base, base, md)
         }
-        base = modmul2048(base, base, md)
+        prod
     }
-    prod
 }
+
+/*pub fn modexp2048(mut base: u2048, exp: &u2048, md: u2048) -> u2048 {
+    prod
+}*/
 
 
 #[cfg(test)]
@@ -421,7 +436,7 @@ mod test {
                                            fb9dbd96add5286bc36694cd412dfd869fbde5d349c1073bbf89478fa521389dc7d27\
                                            87a1a23e2ba2eade4a4ad08e1eb4b01b87fb0fe72382a9868ec66bf96191d0f329d36\
                                            8ea3f43e51e054961cc4cfcc6fce7859ae268ba67fba889d4").unwrap();
-        assert_eq!(modmul2048(a, b, m), expected);
+        assert_eq!(u2048::modmul(a, b, m), expected);
     }
 
     #[test]
@@ -452,7 +467,7 @@ mod test {
                                     680a6972d677ff04cc3d2e7c84cb4463c528ebc87680623db37792f0315447b2a\
                                     5da8d229afa229af95b5249eba3c4b3ea726f54989b76cca9002ee10a383de28e\
                                     fe84ebc6f5b74e9f201fd1b9543679e4ef022bf728270b9687beb10599d55").unwrap();
-        assert_eq!(modexp2048(a, &b, m), u2048::from_hex("61747461636b206174206461776e").unwrap());
+        assert_eq!(u2048::modexp(a, b, m), u2048::from_hex("61747461636b206174206461776e").unwrap());
     }
 }
 
