@@ -1,6 +1,6 @@
 extern crate core;
 
-use core::ops::{Add, Mul, Rem, Sub, Shl, Shr, BitOr};
+use core::ops::{Add, Mul, Rem, Sub, Shl, Shr, BitAnd, BitOr};
 use core::cmp::Ordering;
 use core::fmt;
 use core::num::ParseIntError;
@@ -21,12 +21,12 @@ macro_rules! make_uN {
     }
 
     impl $uN {
-        const HWORDS: usize = $bits / 64;
+        const DWORDS: usize = $bits / 64;
         const BYTES: usize = $bits / 8;
         const BITS: usize = $bits;
 
         fn test_bit(&self, bit: usize) -> bool {
-            self.buf[bit / 8] & ((1 << (bit % 8)) as u8) == 1
+            self.buf[bit / 8] & ((1 << (bit % 8)) as u8) != 0
         }
 
         fn _set_bit(mut self, bit: usize) -> Self {
@@ -34,11 +34,11 @@ macro_rules! make_uN {
             self
         }
 
-        fn buf64(&self) -> &[u64; Self::HWORDS] {
+        fn buf64(&self) -> &[u64; Self::DWORDS] {
             unsafe { transmute(&self.buf) }
         }
 
-        fn buf64_mut(&mut self) -> &mut [u64; Self::HWORDS] {
+        fn buf64_mut(&mut self) -> &mut [u64; Self::DWORDS] {
             unsafe { transmute(&mut self.buf) }
         }
 
@@ -128,7 +128,7 @@ macro_rules! make_uN {
             let mut out: $uN = 0.into();
             let mut carry = 0u128;
             
-            for i in 0..$uN::HWORDS {
+            for i in 0..$uN::DWORDS {
                 let self_buf = self.buf64();
                 let other_buf = other.buf64();
                 let out_buf = out.buf64_mut();
@@ -149,7 +149,7 @@ macro_rules! make_uN {
         fn sub(self, other: $uN) -> $uN {
             let mut out: $uN = 0.into();
             let mut carry = 0u128;
-            for i in 0..$uN::HWORDS {
+            for i in 0..$uN::DWORDS {
                 let self_buf = self.buf64();
                 let other_buf = other.buf64();
                 let out_buf = out.buf64_mut();
@@ -214,10 +214,23 @@ macro_rules! make_uN {
         }
     }
 
+    impl BitAnd for $uN {
+        type Output = $uN;
+        fn bitand(mut self, other: $uN) -> $uN {
+            for i in 0..$uN::DWORDS {
+                let self_buf = self.buf64_mut();
+                let other_buf = other.buf64();
+
+                self_buf[i] &= other_buf[i];
+            }
+            self
+        }
+    }
+
     impl BitOr for $uN {
         type Output = $uN;
         fn bitor(mut self, other: $uN) -> $uN {
-            for i in 0..$uN::HWORDS {
+            for i in 0..$uN::DWORDS {
                 let self_buf = self.buf64_mut();
                 let other_buf = other.buf64();
 
@@ -305,8 +318,11 @@ macro_rules! make_uN {
 
     impl PartialEq for $uN {
         fn eq(&self, other: &Self) -> bool {
-            for i in 0..$uN::BYTES {
-                if self.buf[i] != other.buf[i] {
+            let self_buf = self.buf64();
+            let other_buf = other.buf64();
+
+            for dw in 0..$uN::DWORDS {
+                if self_buf[dw] != other_buf[dw] {
                     return false
                 }
             }
@@ -318,8 +334,11 @@ macro_rules! make_uN {
 
     impl Ord for $uN {
         fn cmp(&self, other: &Self) -> Ordering {
-            for b in (0..$uN::BYTES).rev() {
-                match self.buf[b].cmp(&other.buf[b]) {
+            let self_buf = self.buf64();
+            let other_buf = other.buf64();
+
+            for dw in (0..$uN::DWORDS).rev() {
+                match self_buf[dw].cmp(&other_buf[dw]) {
                     Ordering::Equal => continue,
                     found_order => return found_order
                 }
@@ -359,7 +378,7 @@ impl ModExp for u2048 {
     fn modexp(mut base: u2048, exp: u2048, md: u2048) -> u2048 {
         let mut prod: u2048 = 1.into();
         base = base % md;
-        for bit in 1..u2048::BITS {
+        for bit in 0..u2048::BITS {
             if exp.test_bit(bit) {
                prod = Self::modmul(prod, base, md);
             }
@@ -368,10 +387,6 @@ impl ModExp for u2048 {
         prod
     }
 }
-
-/*pub fn modexp2048(mut base: u2048, exp: &u2048, md: u2048) -> u2048 {
-    prod
-}*/
 
 
 #[cfg(test)]
@@ -470,4 +485,3 @@ mod test {
         assert_eq!(u2048::modexp(a, b, m), u2048::from_hex("61747461636b206174206461776e").unwrap());
     }
 }
-
