@@ -1,49 +1,64 @@
 extern crate core;
 
-use core::ops::{Add, Mul, Rem, Sub, Shl, Shr, BitAnd, BitOr};
+use core::ops::*;
 use core::cmp::Ordering;
 use core::fmt;
 use core::num::ParseIntError;
 use core::mem::transmute;
 
 pub trait ModExp {
-    fn modmul(a: Self, b: Self, m: Self) -> u2048;
-    fn modexp(a: Self, b: Self, m: Self) -> u2048;
+    fn modmul(a: Self, b: Self, m: Self) -> Self;
+    fn modexp(a: Self, b: Self, m: Self) -> Self;
 }
 
 macro_rules! make_uN {
-    ($uN:ident, $bits:expr) => {
+($uN:ident, $bits:expr) => {
+
     #[derive(Copy, Clone)]
     #[allow(non_camel_case_types)]
-    #[repr(align(8))]
+    #[repr(align(16))]
     pub struct $uN {
-        buf: [u8; $uN::BYTES]
+        buf: [u128; $uN::QWORDS]
     }
 
     impl $uN {
+        const QWORDS: usize = $bits / 128;
         const DWORDS: usize = $bits / 64;
         const BYTES: usize = $bits / 8;
         const BITS: usize = $bits;
 
+        pub const ZERO: Self = $uN { buf: [0; $uN::QWORDS] };
+
         fn test_bit(&self, bit: usize) -> bool {
-            self.buf[bit / 8] & ((1 << (bit % 8)) as u8) != 0
+            self.buf()[bit / 8] & ((1 << (bit % 8)) as u8) != 0
         }
 
         fn _set_bit(mut self, bit: usize) -> Self {
-            self.buf[bit / 8] |= (1 << (bit % 8)) as u8;
+            self.buf_mut()[bit / 8] |= (1 << (bit % 8)) as u8;
             self
         }
 
+        fn buf(&self) -> &[u8; Self::BYTES] {
+            unsafe { transmute(&self.buf) }
+        }
+        fn buf_mut(&mut self) -> &mut [u8; Self::BYTES] {
+            unsafe { transmute(&mut self.buf) }
+        }
         fn buf64(&self) -> &[u64; Self::DWORDS] {
             unsafe { transmute(&self.buf) }
         }
-
         fn buf64_mut(&mut self) -> &mut [u64; Self::DWORDS] {
+            unsafe { transmute(&mut self.buf) }
+        }
+        fn buf128(&self) -> &[u128; Self::DWORDS] {
+            unsafe { transmute(&self.buf) }
+        }
+        fn buf128_mut(&mut self) -> &mut [u128; Self::DWORDS] {
             unsafe { transmute(&mut self.buf) }
         }
 
         pub fn from_hex(mut lit: &str) -> Result<Self, ParseIntError> {
-            let mut out: $uN = 0.into();
+            let mut out: $uN = Self::ZERO;
             if let Some(pos) = lit.find(|c| c != '0') {
                 lit = &lit[pos..]
             }
@@ -53,22 +68,24 @@ macro_rules! make_uN {
             let mut i = bytes;
             if lit.len() % 2 == 1 {
                 i -= 1;
-                out.buf[i] = u8::from_str_radix(&lit[..1], 16)?;
+                out.buf_mut()[i] = u8::from_str_radix(&lit[..1], 16)?;
                 lit = &lit[1..];
             }
             while !lit.is_empty() {
                 i -= 1;
-                out.buf[i] = u8::from_str_radix(&lit[..2], 16)?;
+                out.buf_mut()[i] = u8::from_str_radix(&lit[..2], 16)?;
                 lit = &lit[2..];
             }
             Ok(out)
         }
 
         pub fn leading_zeros(&self) -> usize {
-            let leading_zero_bytes = self.buf.iter().rev().take_while(|&b| *b == 0).count();
-            if leading_zero_bytes == $uN::BYTES { return Self::BITS }
-            let msbyte_pos = $uN::BYTES - leading_zero_bytes - 1;
-            leading_zero_bytes * 8 + (self.buf[msbyte_pos].leading_zeros() as usize)
+            let self_buf = self.buf64();
+            let leading_zero_dwords = self.buf64().iter().rev().take_while(|&b| *b == 0).count();
+            if leading_zero_dwords == $uN::DWORDS { return Self::BITS }
+
+            let msdword_pos = $uN::DWORDS - leading_zero_dwords - 1;
+            leading_zero_dwords * 64 + (self_buf[msdword_pos].leading_zeros() as usize)
         }
     }
 
@@ -108,59 +125,81 @@ macro_rules! make_uN {
         }
     }
 
-    impl From<usize> for $uN {
-        fn from(mut val: usize) -> Self {
-            let mut out = $uN { buf: [0; $uN::BYTES] };
-            let mut byte = 0;
-            while val != 0 {
-                out.buf[byte] = val as u8;
-                byte += 1;
-                val >>= 8;
-            }
+    impl From<u64> for $uN {
+        fn from(val: u64) -> Self {
+            let mut out = $uN::ZERO;
+            out.buf128_mut()[0] = val as u128;
             out
+        }
+    }
+    
+    impl From<u128> for $uN {
+        fn from(val: u128) -> Self {
+            let mut out = $uN::ZERO;
+            out.buf128_mut()[0] = val;
+            out
+        }
+    }
+    
+    impl From<usize> for $uN {
+        fn from(val: usize) -> Self {
+            let mut out = $uN::ZERO;
+            out.buf128_mut()[0] = val as u128;
+            out
+        }
+    }
+
+    impl AddAssign for $uN {
+        fn add_assign(&mut self, other: $uN) {
+            let mut carry = false;
+            
+            for i in 0..$uN::QWORDS {
+                let self_buf = self.buf128_mut();
+                let other_buf = other.buf128();
+
+                let a = self_buf[i];
+                let b = other_buf[i];
+                let (word1, carry1) = a.overflowing_add(b);
+                let (word2, carry2) = word1.overflowing_add(carry as u128);
+                self_buf[i] = word2;
+                carry = carry1 | carry2;
+            }
         }
     }
 
     impl Add for $uN {
         type Output = $uN;
 
-        fn add(self, other: $uN) -> $uN {
-            let mut out: $uN = 0.into();
-            let mut carry = 0u128;
-            
-            for i in 0..$uN::DWORDS {
-                let self_buf = self.buf64();
-                let other_buf = other.buf64();
-                let out_buf = out.buf64_mut();
+        fn add(mut self, other: $uN) -> $uN {
+            self += other;
+            self
+        }
+    }
+
+    impl SubAssign for $uN {
+        fn sub_assign(&mut self, other: $uN) {
+            let mut carry = false;
+
+            for i in 0..$uN::QWORDS {
+                let self_buf = self.buf128_mut();
+                let other_buf = other.buf128();
 
                 let a = self_buf[i];
                 let b = other_buf[i];
-                let word = (a as u128) + (b as u128) + carry;
-                out_buf[i] = word as u64;
-                carry = word >> 64;
+                let (subbed1, carry_bool1) = a.overflowing_sub(b);
+                let (subbed2, carry_bool2) = subbed1.overflowing_sub(carry as u128);
+                self_buf[i] = subbed2;
+                carry = carry_bool1 | carry_bool2;
             }
-            out
         }
     }
 
     impl Sub for $uN {
         type Output = $uN;
 
-        fn sub(self, other: $uN) -> $uN {
-            let mut out: $uN = 0.into();
-            let mut carry = 0u128;
-            for i in 0..$uN::DWORDS {
-                let self_buf = self.buf64();
-                let other_buf = other.buf64();
-                let out_buf = out.buf64_mut();
-
-                let a = self_buf[i];
-                let b = other_buf[i];
-                let (subbed, carry_bool) = (a as u128).overflowing_sub((b as u128) + carry);
-                out_buf[i] = subbed as u64;
-                carry = if carry_bool {1} else {0};
-            }
-            out
+        fn sub(mut self, other: $uN) -> $uN {
+            self -= other;
+            self
         }
     }
 
@@ -168,38 +207,36 @@ macro_rules! make_uN {
         type Output = $uN;
 
         fn mul(self, other: $uN) -> $uN {
-            if self == 0.into() || other == 0.into() {
-                return 0.into();
+            if self == Self::ZERO || other == Self::ZERO {
+                return Self::ZERO;
             }
 
-            let cmp: $uN = (!0 >> 8*(::core::mem::size_of::<usize>() / 2)).into();
-            if self < cmp && other < cmp {
+            if self.buf64()[1..].iter().all(|x| *x == 0) && other.buf64()[1..].iter().all(|x| *x == 0) {
                 // Small numbers can be computed directly
-                use core::mem::transmute_copy;
-                unsafe {
-                    let a: usize = transmute_copy(&self.buf);
-                    let b: usize = transmute_copy(&other.buf);
-                    return (a * b).into()
-                }
+                let a = self.buf64()[0] as u128;
+                let b = other.buf64()[0] as u128;
+                let mut out = Self::ZERO;
+                out.buf[0] = a * b;
+                return out;
             }
 
             let half_size = |num: $uN| {
-                let leading_zeros = num.buf.iter().rev().take_while(|&x| *x == 0).count();
+                let leading_zeros = num.buf().iter().rev().take_while(|&x| *x == 0).count();
                 let sig_bytes = $uN::BYTES - leading_zeros;
                 sig_bytes / 2
             };
 
             let split = |num: $uN, size: usize| {
-                let mut top: $uN = 0.into();
-                let mut bot: $uN = 0.into();
-                top.buf[0..$uN::BYTES - size].copy_from_slice(&num.buf[size..]);
-                bot.buf[0..size].copy_from_slice(&num.buf[..size]);
+                let mut top: $uN = Self::ZERO;
+                let mut bot: $uN = Self::ZERO;
+                top.buf_mut()[0..$uN::BYTES - size].copy_from_slice(&num.buf()[size..]);
+                bot.buf_mut()[0..size].copy_from_slice(&num.buf()[..size]);
                 (bot, top)
             };
 
             let byteshift_left = |num: $uN, bytes: usize| {
-                let mut new: $uN = 0.into();
-                new.buf[bytes..].copy_from_slice(&num.buf[..$uN::BYTES-bytes]);
+                let mut new: $uN = Self::ZERO;
+                new.buf_mut()[bytes..].copy_from_slice(&num.buf()[..$uN::BYTES-bytes]);
                 new
             };
 
@@ -217,9 +254,9 @@ macro_rules! make_uN {
     impl BitAnd for $uN {
         type Output = $uN;
         fn bitand(mut self, other: $uN) -> $uN {
-            for i in 0..$uN::DWORDS {
-                let self_buf = self.buf64_mut();
-                let other_buf = other.buf64();
+            for i in 0..$uN::QWORDS {
+                let self_buf = self.buf128_mut();
+                let other_buf = other.buf128();
 
                 self_buf[i] &= other_buf[i];
             }
@@ -230,9 +267,9 @@ macro_rules! make_uN {
     impl BitOr for $uN {
         type Output = $uN;
         fn bitor(mut self, other: $uN) -> $uN {
-            for i in 0..$uN::DWORDS {
-                let self_buf = self.buf64_mut();
-                let other_buf = other.buf64();
+            for i in 0..$uN::QWORDS {
+                let self_buf = self.buf128_mut();
+                let other_buf = other.buf128();
 
                 self_buf[i] |= other_buf[i];
             }
@@ -240,24 +277,51 @@ macro_rules! make_uN {
         }
     }
 
+    impl ShlAssign<usize> for $uN {
+        fn shl_assign(&mut self, mut amount: usize) {
+            if amount % 8 == 0 {
+                amount /= 8;
+                self.buf_mut().rotate_right(amount);
+                self.buf_mut()[..amount].iter_mut().for_each(|x| *x = 0);
+            } else {
+                *self <<= amount >> 3 << 3;
+
+                let self_buf = self.buf128_mut();
+                amount %= 8;
+                for i in (1..$uN::QWORDS).rev() {
+                    let dword = (self_buf[i-1] >> (128 - amount)) | (self_buf[i] << amount);
+                    self_buf[i] = dword;
+                }
+                self_buf[0] <<= amount;
+            }
+        }
+    }
+
     impl Shl<usize> for $uN {
         type Output = $uN;
 
-        fn shl(mut self, mut amount: usize) -> $uN {
+        fn shl(mut self, amount: usize) -> $uN {
+            self <<= amount;
+            self
+        }
+    }
+
+    impl ShrAssign<usize> for $uN {
+        fn shr_assign(&mut self, mut amount: usize) {
             if amount % 8 == 0 {
                 amount /= 8;
-                let mut new: $uN = 0.into();
-                new.buf[amount..].copy_from_slice(&self.buf[..$uN::BYTES - amount]);
-                new
+                self.buf_mut().rotate_left(amount);
+                self.buf_mut()[$uN::BYTES - amount..].iter_mut().for_each(|x| *x = 0);
             } else {
-                self = self << (amount >> 3 << 3);
+                *self >>= amount >> 3 << 3;
+
+                let self_buf = self.buf128_mut();
                 amount %= 8;
-                for i in (1..$uN::BYTES).rev() {
-                    let mut word = (self.buf[i-1] as u16) | ((self.buf[i] as u16) << 8);
-                    self.buf[i] = (word << amount >> 8) as u8;
+                for i in 0..($uN::QWORDS-1) {
+                    let dword = (self_buf[i] >> amount) | (self_buf[i+1] << (128 - amount));
+                    self_buf[i] = dword;
                 }
-                self.buf[0] <<= amount;
-                self
+                self_buf[$uN::QWORDS-1] >>= amount;
             }
         }
     }
@@ -265,22 +329,9 @@ macro_rules! make_uN {
     impl Shr<usize> for $uN {
         type Output = $uN;
 
-        fn shr(mut self, mut amount: usize) -> $uN {
-            if amount % 8 == 0 {
-                amount /= 8;
-                let mut new: $uN = 0.into();
-                new.buf[..$uN::BYTES - amount].copy_from_slice(&self.buf[amount..]);
-                new
-            } else {
-                self = self >> (amount >> 3 << 3);
-                amount %= 8;
-                for i in 0..($uN::BYTES-1) {
-                    let mut word = (self.buf[i] as u16) | ((self.buf[i+1] as u16) << 8);
-                    self.buf[i] = (word >> amount) as u8;
-                }
-                self.buf[$uN::BYTES-1] >>= amount;
-                self
-            }
+        fn shr(mut self, amount: usize) -> $uN {
+            self >>= amount;
+            self
         }
     }
 
@@ -292,14 +343,14 @@ macro_rules! make_uN {
                 if self < modulus {
                     return self
                 }
-                self = self - modulus;
+                self -= modulus;
             }
 
             loop {
                 if self < modulus {
                     return self
                 }
-                self = self - modulus;
+                self -= modulus;
 
                 let self_sig_bits = $uN::BITS - self.leading_zeros();
                 let mod_sig_bits = $uN::BITS - modulus.leading_zeros();
@@ -334,10 +385,10 @@ macro_rules! make_uN {
 
     impl Ord for $uN {
         fn cmp(&self, other: &Self) -> Ordering {
-            let self_buf = self.buf64();
-            let other_buf = other.buf64();
+            let self_buf = self.buf128();
+            let other_buf = other.buf128();
 
-            for dw in (0..$uN::DWORDS).rev() {
+            for dw in (0..$uN::QWORDS).rev() {
                 match self_buf[dw].cmp(&other_buf[dw]) {
                     Ordering::Equal => continue,
                     found_order => return found_order
@@ -352,41 +403,46 @@ macro_rules! make_uN {
             Some(self.cmp(other))
         }
     }
+
+}; ($uN:ident, $size:expr, expands to $next:ident) => {
+
+    make_uN!($uN, $size);
+
+    impl ModExp for $uN {
+        fn modmul(mut a: $uN, b: $uN, m: $uN) -> $uN { 
+            let mut exta = $next::ZERO;
+            let mut extb = $next::ZERO;
+            let mut extm = $next::ZERO;
+            exta.buf[..$uN::QWORDS].copy_from_slice(&a.buf);
+            extb.buf[..$uN::QWORDS].copy_from_slice(&b.buf);
+            extm.buf[..$uN::QWORDS].copy_from_slice(&m.buf);
+
+            let res = (exta * extb) % extm;
+            a.buf[..].copy_from_slice(&res.buf[..$uN::QWORDS]);
+            a
+        } 
+
+        fn modexp(mut base: $uN, exp: $uN, md: $uN) -> $uN {
+            let mut prod: $uN = 1usize.into();
+            base = base % md;
+            for bit in 0..$uN::BITS {
+                if exp.test_bit(bit) {
+                    prod = Self::modmul(prod, base, md);
+                }
+                base = Self::modmul(base, base, md)
+            }
+            prod
+        }
+    }
+
 }}
 
 
-make_uN!(u256, 256);
-make_uN!(u512, 512);
-make_uN!(u1024, 1024);
-make_uN!(u2048, 2048);
+make_uN!(u256, 256, expands to u512);
+make_uN!(u512, 512, expands to u1024);
+make_uN!(u1024, 1024, expands to u2048);
+make_uN!(u2048, 2048, expands to u4096);
 make_uN!(u4096, 4096);
-
-impl ModExp for u2048 {
-    fn modmul(mut a: u2048, b: u2048, m: u2048) -> u2048 { 
-        let mut exta: u4096 = 0.into();
-        let mut extb: u4096 = 0.into();
-        let mut extm: u4096 = 0.into();
-        exta.buf[..u2048::BYTES].copy_from_slice(&a.buf);
-        extb.buf[..u2048::BYTES].copy_from_slice(&b.buf);
-        extm.buf[..u2048::BYTES].copy_from_slice(&m.buf);
-
-        let res = (exta * extb) % extm;
-        a.buf[..].copy_from_slice(&res.buf[..u2048::BYTES]);
-        a
-    } 
-
-    fn modexp(mut base: u2048, exp: u2048, md: u2048) -> u2048 {
-        let mut prod: u2048 = 1.into();
-        base = base % md;
-        for bit in 0..u2048::BITS {
-            if exp.test_bit(bit) {
-               prod = Self::modmul(prod, base, md);
-            }
-            base = Self::modmul(base, base, md)
-        }
-        prod
-    }
-}
 
 
 #[cfg(test)]
@@ -394,17 +450,17 @@ mod test {
     use super::*;
     #[test]
     fn test_display() {
-        assert_eq!(format!("{:X}", u2048::from(0)), "0");
-        assert_eq!(format!("{:X}", u2048::from(10)), "A");
-        assert_eq!(format!("{:X}", u2048::from(0x1010)), "1010");
-        assert_eq!(format!("{:X}", u2048::from(0x010101)), "10101");
+        assert_eq!(format!("{:X}", u2048::from(0u64)), "0");
+        assert_eq!(format!("{:X}", u2048::from(10u64)), "A");
+        assert_eq!(format!("{:X}", u2048::from(0x1010u64)), "1010");
+        assert_eq!(format!("{:X}", u2048::from(0x010101u64)), "10101");
     }
 
     #[test]
     fn test_from_hex() {
-        assert_eq!(u2048::from_hex("1AB5932C").unwrap(), 0x1ab5932c.into());
-        assert_eq!(u2048::from_hex("AB5932C").unwrap(), 0xab5932c.into());
-        assert_eq!(u2048::from_hex("0").unwrap(), 0.into());
+        assert_eq!(u2048::from_hex("1AB5932C").unwrap(), 0x1ab5932cu64.into());
+        assert_eq!(u2048::from_hex("AB5932C").unwrap(), 0xab5932cu64.into());
+        assert_eq!(u2048::from_hex("0").unwrap(), u2048::ZERO);
     }
 
     #[test]
@@ -422,15 +478,15 @@ mod test {
 
         let a = u2048::from_hex("8907415908475034928712983710").unwrap();
         let b = u2048::from_hex("908234").unwrap();
-        assert_eq!(a % b, 0x2b7d8c.into());
+        assert_eq!(a % b, 0x2b7d8cu64.into());
 
-        let a: u2048 = 0.into();
-        let b: u2048 = 32.into();
-        assert_eq!(a % b, 0.into());
+        let a: u2048 = u2048::ZERO;
+        let b: u2048 = 32u64.into();
+        assert_eq!(a % b, u2048::ZERO);
 
-        let a: u2048 = 32.into();
-        let b: u2048 = 32.into();
-        assert_eq!(a % b, 0.into());
+        let a: u2048 = 32u64.into();
+        let b: u2048 = 32u64.into();
+        assert_eq!(a % b, u2048::ZERO);
     }
 
     #[test]
@@ -456,16 +512,18 @@ mod test {
 
     #[test]
     fn test_shift() {
-        let a = u2048 { buf: [0xFF; u2048::BYTES] };
+        let a = u2048::ZERO;
+        let a = a - 1u64.into();
+
         let out = a << 1023;
-        assert!(out.buf[128..].iter().all(|&x| x == 0xFF));
-        assert_eq!(out.buf[127], 0x80);
-        assert!(out.buf[..127].iter().all(|&x| x == 0));
+        assert!(out.buf()[128..].iter().all(|&x| x == 0xFF));
+        assert_eq!(out.buf()[127], 0x80);
+        assert!(out.buf()[..127].iter().all(|&x| x == 0));
 
         let out = out >> 1025;
-        assert!(out.buf[128..].iter().all(|&x| x == 0));
-        assert_eq!(out.buf[127], 0x7F);
-        assert!(out.buf[..127].iter().all(|&x| x == 0xFF));
+        assert!(out.buf()[128..].iter().all(|&x| x == 0));
+        assert_eq!(out.buf()[127], 0x7F);
+        assert!(out.buf()[..127].iter().all(|&x| x == 0xFF));
     }
 
     #[test]

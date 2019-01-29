@@ -2,3 +2,6 @@
 name = "u2N"
 version = "0.1.0"
 authors = ["Gui Andrade <gh@archshift.com>"]
+
+[profile.bench]
+debug = true
