@@ -1,4 +1,4 @@
-extern crate core;
+#![no_std]
 
 use core::ops::*;
 use core::cmp::Ordering;
@@ -7,8 +7,9 @@ use core::num::ParseIntError;
 use core::mem::transmute;
 
 pub trait ModExp {
-    fn modmul(a: Self, b: Self, m: Self) -> Self;
-    fn modexp(a: Self, b: Self, m: Self) -> Self;
+    fn modmul_assign(&mut self, b: &Self, m: &Self);
+    fn modmul(&self, b: &Self, m: &Self) -> Self;
+    fn modexp(&self, b: &Self, m: &Self) -> Self;
 }
 
 macro_rules! make_uN {
@@ -149,8 +150,8 @@ macro_rules! make_uN {
         }
     }
 
-    impl AddAssign for $uN {
-        fn add_assign(&mut self, other: $uN) {
+    impl AddAssign<&Self> for $uN {
+        fn add_assign(&mut self, other: &$uN) {
             let mut carry = false;
             
             for i in 0..$uN::QWORDS {
@@ -167,17 +168,17 @@ macro_rules! make_uN {
         }
     }
 
-    impl Add for $uN {
+    impl Add<&Self> for $uN {
         type Output = $uN;
 
-        fn add(mut self, other: $uN) -> $uN {
+        fn add(mut self, other: &$uN) -> $uN {
             self += other;
             self
         }
     }
 
-    impl SubAssign for $uN {
-        fn sub_assign(&mut self, other: $uN) {
+    impl SubAssign<&Self> for $uN {
+        fn sub_assign(&mut self, other: &$uN) {
             let mut carry = false;
 
             for i in 0..$uN::QWORDS {
@@ -194,21 +195,20 @@ macro_rules! make_uN {
         }
     }
 
-    impl Sub for $uN {
+    impl Sub<&Self> for $uN {
         type Output = $uN;
 
-        fn sub(mut self, other: $uN) -> $uN {
+        fn sub(mut self, other: &$uN) -> $uN {
             self -= other;
             self
         }
     }
 
-    impl Mul for $uN {
-        type Output = $uN;
-
-        fn mul(self, other: $uN) -> $uN {
-            if self == Self::ZERO || other == Self::ZERO {
-                return Self::ZERO;
+    impl MulAssign<&Self> for $uN {
+        fn mul_assign(&mut self, other: &$uN) {
+            if self == &Self::ZERO || other == &Self::ZERO {
+                *self = Self::ZERO;
+                return
             }
 
             if self.buf64()[1..].iter().all(|x| *x == 0) && other.buf64()[1..].iter().all(|x| *x == 0) {
@@ -217,16 +217,17 @@ macro_rules! make_uN {
                 let b = other.buf64()[0] as u128;
                 let mut out = Self::ZERO;
                 out.buf[0] = a * b;
-                return out;
+                *self = out;
+                return
             }
 
-            let half_size = |num: $uN| {
+            let half_size = |num: &$uN| {
                 let leading_zeros = num.buf().iter().rev().take_while(|&x| *x == 0).count();
                 let sig_bytes = $uN::BYTES - leading_zeros;
                 sig_bytes / 2
             };
 
-            let split = |num: $uN, size: usize| {
+            let split = |num: &$uN, size: usize| {
                 let mut top: $uN = Self::ZERO;
                 let mut bot: $uN = Self::ZERO;
                 top.buf_mut()[0..$uN::BYTES - size].copy_from_slice(&num.buf()[size..]);
@@ -234,20 +235,38 @@ macro_rules! make_uN {
                 (bot, top)
             };
 
-            let byteshift_left = |num: $uN, bytes: usize| {
+            let byteshift_left = |num: &$uN, bytes: usize| {
                 let mut new: $uN = Self::ZERO;
                 new.buf_mut()[bytes..].copy_from_slice(&num.buf()[..$uN::BYTES-bytes]);
                 new
             };
 
-            let size = half_size(self.max(other));
+            let size = half_size((&*self).max(other));
             let (a0, a1) = split(self, size);
             let (b0, b1) = split(other, size);
-            let z0 = a0 * b0;
-            let z2 = a1 * b1;
-            let z1 = (a0 + a1) * (b0 + b1) - z0 - z2;
 
-            byteshift_left(z2, size * 2) + byteshift_left(z1, size) + z0
+            // let z1 = (a0 + a1) * (b0 + b1) - (a0 * b0) - (a1 * b1);
+            // let out = z2 at size*2 + z1 at size + z0
+            let mut z1 = a0;
+            let mut acc = b0 + &b1;
+            z1 += &a1;
+            z1 *= &acc;
+            acc = a1 * &b1;
+            z1 -= &acc;
+            *self = byteshift_left(&acc, size * 2);
+            acc = a0 * &b0;
+            z1 -= &acc;
+            *self += &byteshift_left(&z1, size);
+            *self += &acc;
+        }
+    }
+
+    impl Mul<&Self> for $uN {
+        type Output = $uN;
+
+        fn mul(mut self, other: &$uN) -> $uN {
+            self *= other;
+            self
         }
     }
 
@@ -281,8 +300,12 @@ macro_rules! make_uN {
         fn shl_assign(&mut self, mut amount: usize) {
             if amount % 8 == 0 {
                 amount /= 8;
-                self.buf_mut().rotate_right(amount);
-                self.buf_mut()[..amount].iter_mut().for_each(|x| *x = 0);
+                let self_buf = self.buf_mut();
+                unsafe {
+                    use core::ptr;
+                    ptr::copy(self_buf.as_ptr(), self_buf[amount..].as_mut_ptr(), $uN::BYTES - amount);
+                    ptr::write_bytes(self_buf.as_mut_ptr(), 0, amount);
+                }
             } else {
                 *self <<= amount >> 3 << 3;
 
@@ -310,8 +333,12 @@ macro_rules! make_uN {
         fn shr_assign(&mut self, mut amount: usize) {
             if amount % 8 == 0 {
                 amount /= 8;
-                self.buf_mut().rotate_left(amount);
-                self.buf_mut()[$uN::BYTES - amount..].iter_mut().for_each(|x| *x = 0);
+                let self_buf = self.buf_mut();
+                unsafe {
+                    use core::ptr;
+                    ptr::copy(self_buf[amount..].as_ptr(), self_buf.as_mut_ptr(), $uN::BYTES - amount);
+                    ptr::write_bytes(self_buf[$uN::BYTES - amount..].as_mut_ptr(), 0, amount);
+                }
             } else {
                 *self >>= amount >> 3 << 3;
 
@@ -335,22 +362,20 @@ macro_rules! make_uN {
         }
     }
 
-    impl Rem for $uN {
-        type Output = $uN;
-
-        fn rem(mut self, modulus: $uN) -> $uN {
+    impl RemAssign<&Self> for $uN {
+        fn rem_assign(&mut self, modulus: &$uN) {
             for _ in 0..8 {
-                if self < modulus {
-                    return self
+                if &*self < &modulus {
+                    return
                 }
-                self -= modulus;
+                *self -= modulus;
             }
 
             loop {
-                if self < modulus {
-                    return self
+                if &*self < &modulus {
+                    return
                 }
-                self -= modulus;
+                *self -= modulus;
 
                 let self_sig_bits = $uN::BITS - self.leading_zeros();
                 let mod_sig_bits = $uN::BITS - modulus.leading_zeros();
@@ -359,11 +384,20 @@ macro_rules! make_uN {
                 }
                 let top_shift = self_sig_bits - (mod_sig_bits + 2);
                 // extract mod_sig_bits + 2 bit from the top
-                let top = (self >> top_shift) % modulus;
-                let bot = self << ($uN::BITS - top_shift) >> ($uN::BITS - top_shift);
+                let top = (*self >> top_shift) % modulus;
+                let bot = *self << ($uN::BITS - top_shift) >> ($uN::BITS - top_shift);
 
-                self = (top << top_shift) | bot;
+                *self = (top << top_shift) | bot;
             }
+        }
+    }
+
+    impl Rem<&Self> for $uN {
+        type Output = $uN;
+
+        fn rem(mut self, modulus: &$uN) -> $uN {
+            self %= modulus;
+            self
         }
     }
 
@@ -409,27 +443,37 @@ macro_rules! make_uN {
     make_uN!($uN, $size);
 
     impl ModExp for $uN {
-        fn modmul(mut a: $uN, b: $uN, m: $uN) -> $uN { 
-            let mut exta = $next::ZERO;
-            let mut extb = $next::ZERO;
-            let mut extm = $next::ZERO;
-            exta.buf[..$uN::QWORDS].copy_from_slice(&a.buf);
-            extb.buf[..$uN::QWORDS].copy_from_slice(&b.buf);
-            extm.buf[..$uN::QWORDS].copy_from_slice(&m.buf);
+        fn modmul_assign(&mut self, b: &$uN, m: &$uN) { 
+            let mut acc = $next::ZERO;
+            acc.buf[..$uN::QWORDS].copy_from_slice(&self.buf);
+            
+            let mut op = $next::ZERO;
+            // let acc = (exta * extb) % extm;
+            op.buf[..$uN::QWORDS].copy_from_slice(&b.buf);
+            acc *= &op;            
 
-            let res = (exta * extb) % extm;
-            a.buf[..].copy_from_slice(&res.buf[..$uN::QWORDS]);
-            a
-        } 
+            op.buf[..$uN::QWORDS].copy_from_slice(&m.buf);
+            acc %= &op;
+            
+            self.buf[..].copy_from_slice(&acc.buf[..$uN::QWORDS]);
+        }
 
-        fn modexp(mut base: $uN, exp: $uN, md: $uN) -> $uN {
+        fn modmul(&self, b: &$uN, m: &$uN) -> $uN {
+            let mut out = *self;
+            out.modmul_assign(b, m);
+            out
+        }
+
+        fn modexp(&self, exp: &$uN, md: &$uN) -> $uN {
             let mut prod: $uN = 1usize.into();
-            base = base % md;
+            let mut base = *self;
+            base %= md;
             for bit in 0..$uN::BITS {
                 if exp.test_bit(bit) {
-                    prod = Self::modmul(prod, base, md);
+                    prod.modmul_assign(&base, md);
                 }
-                base = Self::modmul(base, base, md)
+                let base_old = base;
+                base.modmul_assign(&base_old, md)
             }
             prod
         }
@@ -467,26 +511,26 @@ mod test {
     fn test_multiply() {
         let a = u2048::from_hex("8907415908475034928712983710").unwrap();
         let b = u2048::from_hex("0927096871290384928634897651").unwrap();
-        assert_eq!(a * b, u2048::from_hex("4e626703eab9a08bfcd04c1a645adb0d493136e95907053c31acc10").unwrap())
+        assert_eq!(a * &b, u2048::from_hex("4e626703eab9a08bfcd04c1a645adb0d493136e95907053c31acc10").unwrap())
     }
 
     #[test]
     fn test_rem() {
         let a = u2048::from_hex("8907415908475034928712983710").unwrap();
         let b = u2048::from_hex("0927096871290384928634897651").unwrap();
-        assert_eq!(a % b, u2048::from_hex("8e4bda2d8091ef48f303313bea2").unwrap());
+        assert_eq!(a % &b, u2048::from_hex("8e4bda2d8091ef48f303313bea2").unwrap());
 
         let a = u2048::from_hex("8907415908475034928712983710").unwrap();
         let b = u2048::from_hex("908234").unwrap();
-        assert_eq!(a % b, 0x2b7d8cu64.into());
+        assert_eq!(a % &b, 0x2b7d8cu64.into());
 
         let a: u2048 = u2048::ZERO;
         let b: u2048 = 32u64.into();
-        assert_eq!(a % b, u2048::ZERO);
+        assert_eq!(a % &b, u2048::ZERO);
 
         let a: u2048 = 32u64.into();
         let b: u2048 = 32u64.into();
-        assert_eq!(a % b, u2048::ZERO);
+        assert_eq!(a % &b, u2048::ZERO);
     }
 
     #[test]
@@ -507,13 +551,13 @@ mod test {
                                            fb9dbd96add5286bc36694cd412dfd869fbde5d349c1073bbf89478fa521389dc7d27\
                                            87a1a23e2ba2eade4a4ad08e1eb4b01b87fb0fe72382a9868ec66bf96191d0f329d36\
                                            8ea3f43e51e054961cc4cfcc6fce7859ae268ba67fba889d4").unwrap();
-        assert_eq!(u2048::modmul(a, b, m), expected);
+        assert_eq!(a.modmul(&b, &m), expected);
     }
 
     #[test]
     fn test_shift() {
         let a = u2048::ZERO;
-        let a = a - 1u64.into();
+        let a = a - &1u64.into();
 
         let out = a << 1023;
         assert!(out.buf()[128..].iter().all(|&x| x == 0xFF));
@@ -540,6 +584,6 @@ mod test {
                                     680a6972d677ff04cc3d2e7c84cb4463c528ebc87680623db37792f0315447b2a\
                                     5da8d229afa229af95b5249eba3c4b3ea726f54989b76cca9002ee10a383de28e\
                                     fe84ebc6f5b74e9f201fd1b9543679e4ef022bf728270b9687beb10599d55").unwrap();
-        assert_eq!(u2048::modexp(a, b, m), u2048::from_hex("61747461636b206174206461776e").unwrap());
+        assert_eq!(a.modexp(&b, &m), u2048::from_hex("61747461636b206174206461776e").unwrap());
     }
 }

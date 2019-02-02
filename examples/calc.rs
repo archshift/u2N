@@ -21,10 +21,10 @@ fn calculate(line: &str) -> u2048 {
     let b_2048 = u2048::from_hex(b).expect("Invalid second operand!");
 
     match op {
-        "+" => return a + b_2048,
-        "-" => return a - b_2048, 
-        "*" => return a * b_2048, 
-        "%" => return a % b_2048,
+        "+" => return a + &b_2048,
+        "-" => return a - &b_2048, 
+        "*" => return a * &b_2048, 
+        "%" => return a % &b_2048,
         _ => {}
     }
 
