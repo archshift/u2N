@@ -39,10 +39,10 @@ macro_rules! make_uN {
             self
         }
 
-        fn buf(&self) -> &[u8; Self::BYTES] {
+        pub fn buf(&self) -> &[u8; Self::BYTES] {
             unsafe { transmute(&self.buf) }
         }
-        fn buf_mut(&mut self) -> &mut [u8; Self::BYTES] {
+        pub fn buf_mut(&mut self) -> &mut [u8; Self::BYTES] {
             unsafe { transmute(&mut self.buf) }
         }
         fn buf64(&self) -> &[u64; Self::DWORDS] {
